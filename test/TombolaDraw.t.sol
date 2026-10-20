@@ -247,6 +247,35 @@ contract TombolaDrawTest is Test {
         draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
     }
 
+    function test_commitRefusesARoundThatIsNotInTheFuture() public {
+        // a round already published off chain but not yet proven on the beacon: the keeper could pick its outcome
+        _fund(1 ether);
+        uint64 past = beacon.roundAt(block.timestamp - 1 hours);
+        vm.prank(keeper);
+        vm.expectRevert(TombolaDraw.RoundTooEarly.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 2 hours), past, 1 ether);
+        // the same old snapshot with a future round is fine: the randomness is still unknown
+        vm.prank(keeper);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 2 hours), ROUND, 1 ether);
+    }
+
+    function test_harvestStillFundsThePotsWhenTheTeamWalletRejects() public {
+        RejectsEth bad = new RejectsEth();
+        TombolaSplitter s2 = new TombolaSplitter(ITombolaDrawPots(address(draw)), address(bad), escrow);
+        escrow.credit{value: 1 ether}(address(s2));
+        s2.harvest();
+        assertEq(draw.potRegular(), 1 ether * 7333 / 10_000);
+        assertEq(draw.potMega(), 1 ether * 2000 / 10_000);
+        assertEq(s2.teamOwed(), 1 ether - 1 ether * 7333 / 10_000 - 1 ether * 2000 / 10_000);
+        assertEq(address(s2).balance, s2.teamOwed());
+        // a second harvest leaves the held share alone
+        escrow.credit{value: 1 ether}(address(s2));
+        s2.harvest();
+        assertEq(address(s2).balance, s2.teamOwed());
+        vm.expectRevert(TombolaSplitter.SendFailed.selector);
+        s2.payTeam();
+    }
+
     function test_commitRefusesAFutureSnapshotAndOverspend() public {
         _fund(1 ether);
         vm.prank(keeper);

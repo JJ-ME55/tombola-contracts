@@ -8,14 +8,15 @@ import {DrandBeacon} from "./DrandBeacon.sol";
 ///         the token is Pons' plain ERC-20 and eligibility can't be read on chain. The keeper commits each draw to
 ///         a FUTURE drand round before taking the snapshot, then settles it with the published snapshot's Merkle
 ///         root, the winner's leaf and drand's signature. The contract enforces what it can:
-///           - the drand round was committed before anyone could know it (round time > snapshot + COMMIT_DELAY);
+///           - the drand round was committed before anyone could know it (round time > snapshot + COMMIT_DELAY,
+///             and later than the commit itself);
 ///           - the signature is drand's (the beacon verifies BLS on BN254) and the winner's index is
 ///             randomWord mod totalWeight over the list the keeper pinned by root;
 ///           - the winner is in that list with the weight the keeper claims (Merkle proof), and the selection index
 ///             falls inside the winner's cumulative weight range (the leaf carries the cumulative weight before it);
 ///           - prizes only ever go to settled winners; nothing else can move ETH out.
 ///         What it cannot enforce is that the pinned list is complete and the weights honest: anyone recomputes
-///         that from Transfer logs (bot/verify-drop.mjs, the site's Verify). A guardian may cancel a committed draw
+///         that from Transfer logs (bot/pons/verify-draw.mjs, the site's Verify). A guardian may cancel a committed draw
 ///         before it settles. No owner, no upgrade, no withdraw.
 contract TombolaDraw {
     enum Track {
@@ -116,16 +117,18 @@ contract TombolaDraw {
 
     // ------------------------------------------------------------------ keeper
     /// @notice Open a draw: reserve `amount` from the track's pot and commit to `drandRound`, which must be
-    ///         published only after snapshotTime + COMMIT_DELAY, so the randomness can't be known when the
-    ///         snapshot is taken. snapshotTime may not be in the future.
+    ///         published only after snapshotTime + COMMIT_DELAY and after this block, so the randomness can't be
+    ///         known when the snapshot is taken nor when the draw is committed. snapshotTime may not be in the future.
     function commit(Track track, uint64 snapshotTime, uint64 drandRound, uint256 amount) external returns (uint256 id) {
         if (msg.sender != keeper) revert NotKeeper();
         if (activeDraw[track] != 0) revert TrackBusy();
         if (snapshotTime > block.timestamp) revert WrongStage();
-        if (beacon.roundTime(drandRound) < uint256(snapshotTime) + COMMIT_DELAY) revert RoundTooEarly();
+        uint256 roundTime = beacon.roundTime(drandRound);
+        if (roundTime < uint256(snapshotTime) + COMMIT_DELAY) revert RoundTooEarly();
+        if (roundTime <= block.timestamp) revert RoundTooEarly(); // the round must still be in the future
         if (beacon.randomness(drandRound) != bytes32(0)) revert RoundTooEarly(); // already known on chain
         uint256 pot = track == Track.Regular ? potRegular : potMega;
-        if (amount == 0 || amount > pot) revert NotEnoughPot();
+        if (amount == 0 || amount > pot || amount > type(uint128).max) revert NotEnoughPot();
         if (track == Track.Regular) potRegular -= amount;
         else potMega -= amount;
         reserved += amount;

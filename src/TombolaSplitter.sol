@@ -28,8 +28,11 @@ contract TombolaSplitter {
     address public immutable teamFeeWallet;
     IPonsFeeEscrow public immutable escrow; // address(0): harvest() only splits what is already here
 
+    uint256 public teamOwed; // a team share whose send failed waits here; it never blocks the pots
+
     event Harvested(uint256 claimed);
     event Distributed(uint256 pot, uint256 mega, uint256 team);
+    event TeamShareHeld(uint256 amount);
 
     error ZeroAddress();
     error SendFailed();
@@ -54,8 +57,19 @@ contract TombolaSplitter {
         if (address(escrow) != address(0) && escrow.balanceOf(address(this)) > 0) {
             emit Harvested(escrow.claim());
         }
-        uint256 bal = address(this).balance;
+        uint256 bal = address(this).balance - teamOwed;
         if (bal > 0) _distribute(bal);
+        _lock = 0;
+    }
+
+    /// @notice Retry a team share that could not be delivered. Anyone may call it.
+    function payTeam() external {
+        if (_lock == 1) revert Reentered();
+        _lock = 1;
+        uint256 owed = teamOwed;
+        teamOwed = 0;
+        (bool ok,) = payable(teamFeeWallet).call{value: owed}("");
+        if (!ok) revert SendFailed();
         _lock = 0;
     }
 
@@ -66,7 +80,10 @@ contract TombolaSplitter {
         draw.fundRegular{value: pot}();
         draw.fundMega{value: mega}();
         (bool ok,) = payable(teamFeeWallet).call{value: team}("");
-        if (!ok) revert SendFailed();
+        if (!ok) {
+            teamOwed += team; // the pots are funded regardless; the team collects later via payTeam()
+            emit TeamShareHeld(team);
+        }
         emit Distributed(pot, mega, team);
     }
 }
