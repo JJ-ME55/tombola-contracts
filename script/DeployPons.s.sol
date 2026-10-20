@@ -7,13 +7,13 @@ import {TombolaDraw} from "../src/TombolaDraw.sol";
 import {TombolaSplitter, IPonsFeeEscrow, ITombolaDrawPots} from "../src/TombolaSplitter.sol";
 
 /// Deploys TombolaDraw and TombolaSplitter for the Pons launch, reusing the DrandBeacon already on chain.
-/// Environment: BEACON (0xaf4f...9A0E on Robinhood Chain), KEEPER, GUARDIAN (0 for none), TEAM_FEE_WALLET,
+/// Environment: BEACON (0xaf4f...9A0E on Robinhood Chain), KEEPER, GUARDIAN (required: cancels a bad draw before its round, rotates the keeper), TEAM_FEE_WALLET,
 /// PONS_ESCROW (0xd3AF...Ac9e on Robinhood Chain).
 contract DeployPons is Script {
     function run() external returns (TombolaDraw draw, TombolaSplitter splitter) {
         DrandBeacon beacon = DrandBeacon(vm.envAddress("BEACON"));
         address keeper = vm.envAddress("KEEPER");
-        address guardian = vm.envOr("GUARDIAN", address(0));
+        address guardian = vm.envAddress("GUARDIAN");
         address teamFee = vm.envAddress("TEAM_FEE_WALLET");
         address escrow = vm.envAddress("PONS_ESCROW");
         require(address(beacon).code.length > 0, "no beacon code");

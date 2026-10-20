@@ -148,8 +148,27 @@ contract TombolaDrawTest is Test {
         for (uint256 i = 0; i < 3; i++) leaves[i] = Tree.leaf(a[i], cum[i], w[i]);
     }
 
-    function _winnerIndex(uint256 id, bytes32 root) internal view returns (uint256 idx, uint256 target) {
-        root; // the word doesn't depend on the root
+    function _root() internal view returns (bytes32 root) {
+        (root,) = Tree.build(_leaves(), 0);
+    }
+
+    /// the keeper pins the honest three-wallet list at "now" and commits amt to the fixture round
+    function _commit(uint256 amt) internal returns (uint256 id) {
+        vm.prank(keeper);
+        id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, amt, _root(), 400e18);
+    }
+
+    /// a one-wallet list: the wallet holds the whole weight so it must win
+    function _commitSolo(address who) internal returns (uint256 id, bytes32[] memory proof) {
+        bytes32[] memory leaves = new bytes32[](1);
+        leaves[0] = Tree.leaf(who, 0, 1e18);
+        bytes32 root;
+        (root, proof) = Tree.build(leaves, 0);
+        vm.prank(keeper);
+        id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, root, 1e18);
+    }
+
+    function _winnerIndex(uint256 id) internal view returns (uint256 idx, uint256 target) {
         uint256 word = uint256(keccak256(abi.encode(keccak256(SIG), id)));
         target = word % 400e18;
         (, uint256[3] memory cum, uint256[3] memory w) = _list();
@@ -158,22 +177,23 @@ contract TombolaDrawTest is Test {
 
     function test_commitSettlePaysTheProvenWinner() public {
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = _commit(1 ether);
         assertEq(draw.reserved(), 1 ether);
         assertEq(draw.potRegular(), 0);
+        TombolaDraw.Draw memory pinned = draw.getDraw(id);
+        assertEq(pinned.root, _root(), "the list is pinned at commit");
+        assertEq(pinned.totalWeight, 400e18);
         vm.warp(beacon.roundTime(ROUND) + 1);
 
-        (uint256 idx,) = _winnerIndex(id, bytes32(0));
-        (bytes32 root, bytes32[] memory proof) = Tree.build(_leaves(), idx);
+        (uint256 idx,) = _winnerIndex(id);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), idx);
         (address[3] memory a, uint256[3] memory cum, uint256[3] memory w) = _list();
         uint256 before = a[idx].balance;
         vm.prank(keeper);
-        draw.settle(id, SIG, root, 400e18, a[idx], cum[idx], w[idx], proof);
+        draw.settle(id, SIG, a[idx], cum[idx], w[idx], proof);
         assertEq(a[idx].balance, before + 1 ether, "the winner is paid");
         TombolaDraw.Draw memory d = draw.getDraw(id);
         assertEq(d.winner, a[idx]);
-        assertEq(d.root, root);
         assertTrue(d.settled);
         assertEq(draw.reserved(), 0);
         assertEq(draw.activeDraw(TombolaDraw.Track.Regular), 0);
@@ -181,57 +201,65 @@ contract TombolaDrawTest is Test {
         assertTrue(draw.solvent());
     }
 
+    /// the audit's High: with totalWeight pinned at commit, the keeper can no longer pick a listed non-winner
+    /// after the round by choosing the modulus
     function test_settleRefusesTheWrongWinner() public {
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = _commit(1 ether);
         vm.warp(beacon.roundTime(ROUND) + 1);
-        (uint256 idx,) = _winnerIndex(id, bytes32(0));
+        (uint256 idx,) = _winnerIndex(id);
         uint256 other = (idx + 1) % 3;
-        (bytes32 root, bytes32[] memory proof) = Tree.build(_leaves(), other);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), other);
         (address[3] memory a, uint256[3] memory cum, uint256[3] memory w) = _list();
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.BadWinner.selector);
-        draw.settle(id, SIG, root, 400e18, a[other], cum[other], w[other], proof);
+        draw.settle(id, SIG, a[other], cum[other], w[other], proof);
     }
 
     function test_settleRefusesALeafNotInTheList() public {
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = _commit(1 ether);
         vm.warp(beacon.roundTime(ROUND) + 1);
-        (uint256 idx,) = _winnerIndex(id, bytes32(0));
-        (bytes32 root, bytes32[] memory proof) = Tree.build(_leaves(), idx);
+        (uint256 idx,) = _winnerIndex(id);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), idx);
         (, uint256[3] memory cum, uint256[3] memory w) = _list();
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.BadProof.selector);
-        draw.settle(id, SIG, root, 400e18, makeAddr("intruder"), cum[idx], w[idx], proof);
+        draw.settle(id, SIG, makeAddr("intruder"), cum[idx], w[idx], proof);
     }
 
     function test_settleRefusesAWeightOutsideTheTotal() public {
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = _commit(1 ether);
         vm.warp(beacon.roundTime(ROUND) + 1);
-        bytes32[] memory leaves = new bytes32[](1);
-        leaves[0] = Tree.leaf(alice, 0, 500e18);
-        (bytes32 root, bytes32[] memory proof) = Tree.build(leaves, 0);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), 0);
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.BadWeights.selector);
-        draw.settle(id, SIG, root, 400e18, alice, 0, 500e18, proof); // weight > total
+        draw.settle(id, SIG, alice, 0, 500e18, proof); // weight > the pinned total
     }
 
     function test_settleRefusesABadSignature() public {
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = _commit(1 ether);
         vm.warp(beacon.roundTime(ROUND) + 1);
         bytes memory bad = SIG;
         bad[5] ^= 0x01;
-        (bytes32 root, bytes32[] memory proof) = Tree.build(_leaves(), 0);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), 0);
         vm.prank(keeper);
         vm.expectRevert(DrandBeacon.InvalidSignature.selector);
-        draw.settle(id, bad, root, 400e18, alice, 0, 100e18, proof);
+        draw.settle(id, bad, alice, 0, 100e18, proof);
+    }
+
+    function test_settleRefusesTheContractsAsWinner() public {
+        _fund(2 ether);
+        (uint256 id, bytes32[] memory proof) = _commitSolo(address(splitter));
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        vm.prank(keeper);
+        vm.expectRevert(TombolaDraw.BadWinner.selector);
+        draw.settle(id, SIG, address(splitter), 0, 1e18, proof);
+        vm.prank(guardian);
+        vm.expectRevert(TombolaDraw.TooEarly.selector); // the round is public: nobody cancels now
+        draw.cancel(id);
     }
 
     function test_commitRefusesARoundTooEarlyOrAlreadyKnown() public {
@@ -239,85 +267,105 @@ contract TombolaDrawTest is Test {
         uint64 soon = beacon.roundAt(block.timestamp + 5 minutes);
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.RoundTooEarly.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), soon, 1 ether);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), soon, 1 ether, _root(), 400e18);
+        // ten minutes after the snapshot but not after the commit block
+        vm.prank(keeper);
+        vm.expectRevert(TombolaDraw.RoundTooEarly.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 20 minutes), soon, 1 ether, _root(), 400e18);
         // a round whose randomness is already on chain can't be committed to either
         vm.store(address(beacon), keccak256(abi.encode(uint256(ROUND), uint256(0))), bytes32(uint256(1)));
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.RoundTooEarly.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
     }
 
-    function test_commitRefusesARoundThatIsNotInTheFuture() public {
-        // a round already published off chain but not yet proven on the beacon: the keeper could pick its outcome
+    function test_commitRefusesARoundFarInTheFuture() public {
         _fund(1 ether);
-        uint64 past = beacon.roundAt(block.timestamp - 1 hours);
+        uint64 far = beacon.roundAt(block.timestamp + 2 days);
         vm.prank(keeper);
-        vm.expectRevert(TombolaDraw.RoundTooEarly.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 2 hours), past, 1 ether);
-        // the same old snapshot with a future round is fine: the randomness is still unknown
+        vm.expectRevert(TombolaDraw.RoundTooLate.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), far, 1 ether, _root(), 400e18);
+        uint64 mistaken = uint64(block.timestamp); // a unix time passed as a round number
         vm.prank(keeper);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 2 hours), ROUND, 1 ether);
+        vm.expectRevert(TombolaDraw.RoundTooLate.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), mistaken, 1 ether, _root(), 400e18);
     }
 
-    function test_harvestStillFundsThePotsWhenTheTeamWalletRejects() public {
-        RejectsEth bad = new RejectsEth();
-        TombolaSplitter s2 = new TombolaSplitter(ITombolaDrawPots(address(draw)), address(bad), escrow);
-        escrow.credit{value: 1 ether}(address(s2));
-        s2.harvest();
-        assertEq(draw.potRegular(), 1 ether * 7333 / 10_000);
-        assertEq(draw.potMega(), 1 ether * 2000 / 10_000);
-        assertEq(s2.teamOwed(), 1 ether - 1 ether * 7333 / 10_000 - 1 ether * 2000 / 10_000);
-        assertEq(address(s2).balance, s2.teamOwed());
-        // a second harvest leaves the held share alone
-        escrow.credit{value: 1 ether}(address(s2));
-        s2.harvest();
-        assertEq(address(s2).balance, s2.teamOwed());
-        vm.expectRevert(TombolaSplitter.SendFailed.selector);
-        s2.payTeam();
-    }
-
-    function test_commitRefusesAFutureSnapshotAndOverspend() public {
+    function test_commitRefusesAStaleOrFutureSnapshot() public {
         _fund(1 ether);
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.WrongStage.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp + 1), ROUND, 1 ether);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp + 1), ROUND, 1 ether, _root(), 400e18);
         vm.prank(keeper);
+        vm.expectRevert(TombolaDraw.WrongStage.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 31 minutes), ROUND, 1 ether, _root(), 400e18);
+        vm.prank(keeper);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp - 10 minutes), ROUND, 1 ether, _root(), 400e18);
+    }
+
+    function test_commitRefusesAnInconsistentListOrOverspend() public {
+        _fund(1 ether);
+        bytes32 empty = draw.EMPTY_ROOT();
+        bytes32 honest = _root();
+        vm.startPrank(keeper);
+        vm.expectRevert(TombolaDraw.BadWeights.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, honest, 0);
+        vm.expectRevert(TombolaDraw.BadWeights.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, empty, 400e18);
+        vm.expectRevert(TombolaDraw.BadWeights.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, bytes32(0), 400e18);
         vm.expectRevert(TombolaDraw.NotEnoughPot.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 2 ether);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 2 ether, _root(), 400e18);
+        vm.stopPrank();
     }
 
     function test_oneOpenDrawPerTrack() public {
         _fund(2 ether);
-        vm.startPrank(keeper);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        _commit(1 ether);
+        vm.prank(keeper);
         vm.expectRevert(TombolaDraw.TrackBusy.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
-        vm.stopPrank();
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
     }
 
     function test_onlyTheKeeperCommitsAndSettles() public {
         _fund(1 ether);
         vm.expectRevert(TombolaDraw.NotKeeper.selector);
-        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
+        uint256 id = _commit(1 ether);
+        vm.expectRevert(TombolaDraw.NotKeeper.selector);
+        draw.rollover(id, SIG);
     }
 
-    function test_rolloverReturnsThePot() public {
+    function test_rolloverOnlyWhenNobodyWasEligible() public {
         _fund(1 ether);
+        bytes32 empty = draw.EMPTY_ROOT();
         vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, empty, 0);
         vm.warp(beacon.roundTime(ROUND) + 1);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), 0);
         vm.prank(keeper);
-        draw.rollover(id, SIG, keccak256("empty list"));
+        vm.expectRevert(TombolaDraw.WrongStage.selector);
+        draw.settle(id, SIG, alice, 0, 100e18, proof);
+        vm.prank(keeper);
+        draw.rollover(id, SIG);
         assertEq(draw.potRegular(), 1 ether);
         assertEq(draw.reserved(), 0);
         assertTrue(draw.getDraw(id).settled);
         assertEq(draw.getDraw(id).winner, address(0));
+
+        // a draw with an eligible list can't be rolled over once the winner is known
+        vm.warp(beacon.roundTime(ROUND) - 20 minutes);
+        vm.store(address(beacon), keccak256(abi.encode(uint256(ROUND), uint256(0))), bytes32(0)); // forget the proof
+        uint256 id2 = _commit(1 ether);
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        vm.prank(keeper);
+        vm.expectRevert(TombolaDraw.WrongStage.selector);
+        draw.rollover(id2, SIG);
     }
 
-    function test_guardianCancelsAndAnyoneCanAfterSevenDays() public {
+    function test_guardianCancelsOnlyBeforeTheRoundAndAnyoneAfterSevenDays() public {
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id = _commit(1 ether);
         vm.expectRevert(TombolaDraw.NotGuardian.selector);
         draw.cancel(id);
         vm.prank(guardian);
@@ -325,42 +373,80 @@ contract TombolaDrawTest is Test {
         assertEq(draw.potRegular(), 1 ether);
         assertTrue(draw.getDraw(id).cancelled);
 
-        vm.prank(keeper);
-        uint256 id2 = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        uint256 id2 = _commit(1 ether);
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        vm.prank(guardian);
+        vm.expectRevert(TombolaDraw.TooEarly.selector); // the outcome is public: no veto
+        draw.cancel(id2);
         vm.warp(beacon.roundTime(ROUND) + 7 days);
         draw.cancel(id2); // anyone, once abandoned
         assertEq(draw.potRegular(), 1 ether);
     }
 
-    function test_failedPayoutIsCreditedAndClaimable() public {
+    function test_guardianRotatesTheKeeperBetweenDraws() public {
+        address next = makeAddr("next keeper");
+        vm.expectRevert(TombolaDraw.NotGuardian.selector);
+        draw.setKeeper(next);
+        _fund(1 ether);
+        uint256 id = _commit(1 ether);
+        vm.prank(guardian);
+        vm.expectRevert(TombolaDraw.TrackBusy.selector);
+        draw.setKeeper(next);
+        vm.prank(guardian);
+        draw.cancel(id);
+        vm.prank(guardian);
+        draw.setKeeper(next);
+        assertEq(draw.keeper(), next);
+        vm.prank(keeper);
+        vm.expectRevert(TombolaDraw.NotKeeper.selector);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
+        vm.prank(next);
+        draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
+    }
+
+    function test_failedPayoutIsCreditedAndExpiresBackToThePot() public {
         RejectsEth r = new RejectsEth();
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        (uint256 id, bytes32[] memory proof) = _commitSolo(address(r));
         vm.warp(beacon.roundTime(ROUND) + 1);
-        bytes32[] memory leaves = new bytes32[](1);
-        leaves[0] = Tree.leaf(address(r), 0, 1e18);
-        (bytes32 root, bytes32[] memory proof) = Tree.build(leaves, 0);
         vm.prank(keeper);
-        draw.settle(id, SIG, root, 1e18, address(r), 0, 1e18, proof);
+        draw.settle(id, SIG, address(r), 0, 1e18, proof);
         assertEq(draw.unclaimed(address(r)), 1 ether);
         assertTrue(draw.solvent());
         vm.expectRevert(TombolaDraw.SendFailed.selector);
         draw.claim(address(r));
+        vm.expectRevert(TombolaDraw.TooEarly.selector);
+        draw.expireCredit(address(r));
+        vm.warp(block.timestamp + 365 days);
+        draw.expireCredit(address(r));
+        assertEq(draw.unclaimed(address(r)), 0);
+        assertEq(draw.potRegular(), 1 ether);
+        assertTrue(draw.solvent());
+    }
+
+    function test_creditedContractCanRedirectItsPrize() public {
+        Redirector r = new Redirector();
+        _fund(1 ether);
+        (uint256 id, bytes32[] memory proof) = _commitSolo(address(r));
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        vm.prank(keeper);
+        draw.settle(id, SIG, address(r), 0, 1e18, proof);
+        assertEq(draw.unclaimed(address(r)), 1 ether, "a receiver that needs more than the stipend is credited");
+        address home = makeAddr("home");
+        r.collect(draw, home);
+        assertEq(home.balance, 1 ether);
+        assertEq(draw.unclaimedTotal(), 0);
+        assertTrue(draw.solvent());
     }
 
     function test_reentrantWinnerCantReenter() public {
         ReentrantWinner w = new ReentrantWinner();
         vm.store(address(w), bytes32(uint256(0)), bytes32(uint256(uint160(address(draw)))));
         _fund(1 ether);
-        vm.prank(keeper);
-        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether);
+        (uint256 id, bytes32[] memory proof) = _commitSolo(address(w));
         vm.warp(beacon.roundTime(ROUND) + 1);
-        bytes32[] memory leaves = new bytes32[](1);
-        leaves[0] = Tree.leaf(address(w), 0, 1e18);
-        (bytes32 root, bytes32[] memory proof) = Tree.build(leaves, 0);
         vm.prank(keeper);
-        draw.settle(id, SIG, root, 1e18, address(w), 0, 1e18, proof);
+        draw.settle(id, SIG, address(w), 0, 1e18, proof);
         assertEq(address(w).balance, 1 ether);
         assertTrue(draw.solvent());
     }
@@ -383,4 +469,17 @@ contract TombolaDrawTest is Test {
     }
 
     receive() external payable {}
+}
+
+/// A winner whose receive() burns more than the payout stipend (so it is credited) and then collects via redirectCredit.
+contract Redirector {
+    uint256[] private _sink;
+
+    receive() external payable {
+        if (gasleft() < 60_000) { for (uint256 i = 0; i < 10; i++) _sink.push(i); } // needs more than PAYOUT_GAS
+    }
+
+    function collect(TombolaDraw draw, address to) external {
+        draw.redirectCredit(to);
+    }
 }
