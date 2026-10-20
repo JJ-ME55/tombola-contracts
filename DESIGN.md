@@ -14,7 +14,7 @@ where the tax is Pons' own creator tax, charged on buys and sells alike, outside
 | Where the tax lands | DropVault, in ETH, via tax orders | Pons fee escrow, in ETH; the splitter claims it |
 | Split | 3.5 / 1.2 / 0.9 / 0.4 of 6 | 73.33% pot / 20% mega / 6.67% team of the 5.7% that arrives (liquidity folded into the pot) |
 | Draw | on chain, enforced by the vault | off chain in the keeper, committed and provable; payouts pushed through a Merkle round |
-| Randomness | drand, verified on chain in the vault | drand, the round committed on chain before the snapshot, verified by anyone |
+| Randomness | drand, verified on chain in the vault | drand, the round committed on chain together with the pinned snapshot list, before the round exists; verified by anyone |
 | Winner paid | by the vault, in ETH | by the TombolaDraw contract, in ETH, pushed by the keeper (claimable by the winner too) |
 | Eligibility | 10,000 tokens, 30 minutes, 1x to 3x over 72 h | the same, computed from Transfer logs |
 | Cadence | hourly for 6 h, then every 4 h; mega weekly | the same |
@@ -30,10 +30,10 @@ where the tax is Pons' own creator tax, charged on buys and sells alike, outside
     Reverts unless `drandRound` is at least COMMIT_DELAY after both the snapshot and this block (and at most a day
     ahead), the snapshot is recent, the list is consistent and `potWei <= pot[track]`.
     The snapshot block is the last block at or before `snapshotTime`; the published snapshot names it.
-  - `settle(id, drandSignature, winner, cumulativeBefore, weight, proof)` by the keeper: the beacon verifies the signature
-    on chain (the DrandBeacon already deployed: BLS over BN254); the contract records the winner, the Merkle root of
-    the published snapshot (so the list that produced the winner is pinned on chain), and pays the winner the amount
-    (or credits it, claimable, if the send fails). The winner must be the leaf the keeper proves against the root:
+  - `settle(id, drandSignature, winner, cumulativeBefore, weight, proof)` by anyone once the round is out: the beacon
+    verifies the signature on chain (the DrandBeacon already deployed: BLS over BN254); the contract derives the random
+    word, checks the winner's leaf against the root and total weight pinned at commit, and pays the winner the amount
+    (or credits it, claimable, if the send fails). The winner must be the leaf proven against the pinned root:
     `settle` takes the winner's leaf proof, so the contract checks the winner is IN the pinned list with the claimed
     weight. What it cannot check is that the list is complete and the weights honest: that is what verify-drop
     recomputes from Transfer logs.
@@ -45,12 +45,12 @@ where the tax is Pons' own creator tax, charged on buys and sells alike, outside
 
 ## The keeper (bot/)
 
-Every tick: harvest the splitter when the escrow holds fees; at each due slot commit a draw; after the drand round
-is published, build the snapshot from Transfer logs (balance at the snapshot block, hold start from the last inbound
-transfer that wasn't a reset, 10,000 minimum, 30-minute gate, 1x to 3x multiplier), pick `randomWord mod totalWeight`,
-publish the snapshot (JSON with every wallet, balance, hold start, weight, plus the Merkle root) to the public
-tombola-draws repo, and settle on chain. verify-drop.mjs and the site's Verify rebuild the snapshot from the chain and
-drand and check the winner, exactly as before.
+Every tick: harvest the splitter when the escrow holds fees; at each due slot build the snapshot from Transfer logs
+(balance at the snapshot block, hold start from the last inbound transfer that wasn't a reset, 10,000 minimum,
+30-minute gate, 1x to 3x multiplier), publish it (JSON with every wallet, balance, hold start, weight, proof, plus the
+Merkle root) to the public tombola-draws repo, and commit the draw with the list's root and total weight; after the
+drand round is published, pick `randomWord mod totalWeight` and settle on chain. verify-draw.mjs and the site's Verify
+rebuild the snapshot from the chain and drand and check the pinned root, the total and the winner.
 
 ## Trust
 

@@ -21,9 +21,10 @@ import {DrandBeacon} from "./DrandBeacon.sol";
 ///           - prizes only ever go to settled winners; nothing else can move ETH out.
 ///         What it cannot enforce is that the pinned list is complete and the weights honest: anyone recomputes
 ///         that from Transfer logs (bot/pons/verify-draw.mjs, the site's Verify) in the window between the commit
-///         and the round, and the guardian may cancel a committed draw in that window. After the round's time
-///         nobody can cancel until ABANDON_AFTER has passed, so a known outcome can't be vetoed. No owner, no
-///         upgrade, no withdraw; the guardian may rotate the keeper between draws.
+///         and the round, and the guardian may cancel a committed draw in that window (up to CANCEL_MARGIN before the round).
+///         Once the round is out ANYONE may settle or roll the draw over with the public data, and nobody can
+///         cancel until ABANDON_AFTER has passed, so a known outcome can be neither vetoed nor withheld. No owner,
+///         no upgrade, no withdraw; the guardian may rotate the keeper at any time.
 contract TombolaDraw {
     enum Track {
         Regular,
@@ -50,6 +51,7 @@ contract TombolaDraw {
     uint256 public constant FULL_MULTIPLIER_AFTER = 72 hours;
     uint256 public constant MIN_BALANCE = 10_000e18;
     uint256 public constant ABANDON_AFTER = 7 days; // a draw whose round never gets settled can be cancelled by anyone
+    uint256 public constant CANCEL_MARGIN = 1 minutes; // the guardian's cancel ends this long before the round, against clock skew
     uint256 public constant CREDIT_EXPIRY = 365 days; // an unclaimed prize older than this may be returned to the pot
     uint256 public constant PAYOUT_GAS = 50_000;
     bytes32 public constant EMPTY_ROOT = keccak256(""); // the root an empty list pins
@@ -57,13 +59,14 @@ contract TombolaDraw {
     DrandBeacon public immutable beacon;
     address public immutable guardian;
     address public immutable splitter; // the only funder besides plain ETH gifts
-    address public keeper; // the hot wallet; the guardian may replace it between draws
+    address public keeper; // the hot wallet; the guardian may replace it at any time
 
     uint256 public potRegular;
     uint256 public potMega;
     uint256 public reserved; // committed, unsettled prizes
     uint256 public unclaimedTotal;
     mapping(address => uint256) public unclaimed;
+    mapping(address => uint256) public unclaimedMega; // the part of `unclaimed` that came from mega draws
     mapping(address => uint256) public creditedAt; // when the credit was (last) made
 
     Draw[] private _draws;
@@ -178,11 +181,11 @@ contract TombolaDraw {
     ///         (winner, cumulativeBefore, weight) with its proof against the pinned root. The contract checks the
     ///         signature, derives the random word, checks the leaf is in the pinned list and that
     ///         randomWord mod the pinned totalWeight falls in [cumulativeBefore, cumulativeBefore + weight), then pays.
+    ///         Anyone may call it: every input is public once the round is out, so the keeper can't withhold a result.
     function settle(uint256 id, bytes calldata drandSignature, address winner, uint256 cumulativeBefore, uint256 weight, bytes32[] calldata proof)
         external
         nonReentrant
     {
-        if (msg.sender != keeper) revert NotKeeper();
         Draw storage d = _open(id);
         if (d.totalWeight == 0) revert WrongStage(); // nobody was eligible: rollover
         if (winner == address(0) || winner == address(this) || winner == splitter) revert BadWinner();
@@ -204,13 +207,12 @@ contract TombolaDraw {
         uint256 amount = d.amount;
         reserved -= amount;
         emit Settled(id, winner, amount, d.root, totalWeight, word);
-        _pay(winner, amount);
+        _pay(winner, amount, d.track);
     }
 
     /// @notice Nobody was eligible at the snapshot (the pinned list is empty): prove the round for the record and
-    ///         return the prize to its pot.
+    ///         return the prize to its pot. Anyone may call it.
     function rollover(uint256 id, bytes calldata drandSignature) external nonReentrant {
-        if (msg.sender != keeper) revert NotKeeper();
         Draw storage d = _open(id);
         if (d.totalWeight != 0) revert WrongStage(); // somebody was eligible: settle
         bytes32 rnd = beacon.prove(d.drandRound, drandSignature);
@@ -222,14 +224,14 @@ contract TombolaDraw {
     }
 
     // ------------------------------------------------------------------ guardian / anyone
-    /// @notice The guardian may cancel a committed draw while its round is still in the future (a list it has
-    ///         checked and found dishonest). Once the round's time has passed the outcome is public and nobody may
-    ///         cancel, until ABANDON_AFTER later, when anyone may, so a dead keeper can't lock a prize. The prize
-    ///         goes back to its pot.
+    /// @notice The guardian may cancel a committed draw while its round is still at least CANCEL_MARGIN away (a
+    ///         list it has checked and found dishonest). From there the outcome is, or is about to be, public and
+    ///         nobody may cancel, until ABANDON_AFTER past the round, when anyone may, so a prize nobody settles
+    ///         can't stay locked. The prize goes back to its pot.
     function cancel(uint256 id) external nonReentrant {
         Draw storage d = _open(id);
         uint256 roundTime = beacon.roundTime(d.drandRound);
-        if (block.timestamp < roundTime) {
+        if (block.timestamp + CANCEL_MARGIN < roundTime) {
             if (msg.sender != guardian) revert NotGuardian();
         } else if (block.timestamp < roundTime + ABANDON_AFTER) {
             revert TooEarly();
@@ -240,11 +242,11 @@ contract TombolaDraw {
         emit Cancelled(id);
     }
 
-    /// @notice Replace the keeper (a hot wallet) between draws. Guardian only.
+    /// @notice Replace the keeper (a hot wallet). Guardian only, at any time: open draws are fully pinned and
+    ///         anyone can settle them, so a leaked key can't hold the rotation off by keeping a draw open.
     function setKeeper(address keeper_) external {
         if (msg.sender != guardian) revert NotGuardian();
         if (keeper_ == address(0)) revert ZeroAddress();
-        if (activeDraw[Track.Regular] != 0 || activeDraw[Track.Mega] != 0) revert TrackBusy();
         keeper = keeper_;
         emit KeeperChanged(keeper_);
     }
@@ -267,13 +269,17 @@ contract TombolaDraw {
         emit CreditRedirected(msg.sender, to, amt);
     }
 
-    /// @notice A credit nobody has collected for CREDIT_EXPIRY goes back to the regular pot. Anyone may call it.
+    /// @notice A credit nobody has collected for CREDIT_EXPIRY goes back to the pot it came from. Anyone may call it.
     function expireCredit(address from) external nonReentrant {
         if (block.timestamp < creditedAt[from] + CREDIT_EXPIRY) revert TooEarly();
+        uint256 mega = unclaimedMega[from];
         uint256 amt = _takeCredit(from);
-        potRegular += amt;
+        uint256 regular = amt - mega;
+        potRegular += regular;
+        potMega += mega;
         emit CreditExpired(from, amt);
-        emit Funded(Track.Regular, amt);
+        if (regular > 0) emit Funded(Track.Regular, regular);
+        if (mega > 0) emit Funded(Track.Mega, mega);
     }
 
     // ------------------------------------------------------------------ views
@@ -314,10 +320,11 @@ contract TombolaDraw {
         else potMega += amount;
     }
 
-    function _pay(address to, uint256 amount) internal {
+    function _pay(address to, uint256 amount, Track track) internal {
         (bool ok,) = payable(to).call{value: amount, gas: PAYOUT_GAS}("");
         if (!ok) {
             unclaimed[to] += amount;
+            if (track == Track.Mega) unclaimedMega[to] += amount;
             unclaimedTotal += amount;
             creditedAt[to] = block.timestamp;
             emit PayoutCredited(to, amount);
@@ -328,6 +335,7 @@ contract TombolaDraw {
         amt = unclaimed[from];
         if (amt == 0) revert NoDraw();
         unclaimed[from] = 0;
+        unclaimedMega[from] = 0;
         unclaimedTotal -= amt;
     }
 

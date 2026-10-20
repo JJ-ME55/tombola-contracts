@@ -22,6 +22,17 @@ contract FakeEscrow is IPonsFeeEscrow {
     }
 }
 
+/// An escrow whose claim() always reverts although it reports a balance.
+contract RevertingEscrow is IPonsFeeEscrow {
+    function balanceOf(address) external pure returns (uint256) {
+        return 1;
+    }
+
+    function claim() external pure returns (uint256) {
+        revert("paused");
+    }
+}
+
 contract RejectsEth {
     receive() external payable {
         revert("no");
@@ -110,6 +121,15 @@ contract TombolaDrawTest is Test {
         assertEq(team.balance, 3 ether - 3 ether * 7333 / 10_000 - 3 ether * 2000 / 10_000);
         assertEq(address(splitter).balance, 0, "nothing stays in the splitter");
         assertTrue(draw.solvent());
+    }
+
+    function test_harvestSplitsWhatIsHereWhenTheEscrowClaimReverts() public {
+        RevertingEscrow bad = new RevertingEscrow();
+        TombolaSplitter s2 = new TombolaSplitter(ITombolaDrawPots(address(draw)), team, IPonsFeeEscrow(address(bad)));
+        vm.deal(address(s2), 1 ether);
+        s2.harvest();
+        assertEq(draw.potRegular(), 1 ether * 7333 / 10_000);
+        assertEq(address(s2).balance, 0);
     }
 
     function test_harvestWithNothingIsANoop() public {
@@ -327,13 +347,63 @@ contract TombolaDrawTest is Test {
         draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
     }
 
-    function test_onlyTheKeeperCommitsAndSettles() public {
+    function test_onlyTheKeeperCommitsButAnyoneSettles() public {
         _fund(1 ether);
         vm.expectRevert(TombolaDraw.NotKeeper.selector);
         draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);
         uint256 id = _commit(1 ether);
-        vm.expectRevert(TombolaDraw.NotKeeper.selector);
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        (uint256 idx,) = _winnerIndex(id);
+        (, bytes32[] memory proof) = Tree.build(_leaves(), idx);
+        (address[3] memory a, uint256[3] memory cum, uint256[3] memory w) = _list();
+        // a stranger settles with the public data: the keeper can't withhold a known result
+        vm.prank(makeAddr("stranger"));
+        draw.settle(id, SIG, a[idx], cum[idx], w[idx], proof);
+        assertEq(draw.getDraw(id).winner, a[idx]);
+    }
+
+    function test_anyoneRollsOverAnEmptyDraw() public {
+        _fund(1 ether);
+        bytes32 empty = draw.EMPTY_ROOT();
+        vm.prank(keeper);
+        uint256 id = draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, empty, 0);
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        vm.prank(makeAddr("stranger"));
         draw.rollover(id, SIG);
+        assertEq(draw.potRegular(), 1 ether);
+    }
+
+    function test_guardianCancelStopsAMinuteBeforeTheRound() public {
+        _fund(1 ether);
+        uint256 id = _commit(1 ether);
+        vm.warp(beacon.roundTime(ROUND) - 30);
+        vm.prank(guardian);
+        vm.expectRevert(TombolaDraw.TooEarly.selector);
+        draw.cancel(id);
+        vm.warp(beacon.roundTime(ROUND) - 2 minutes);
+        vm.prank(guardian);
+        draw.cancel(id);
+        assertTrue(draw.getDraw(id).cancelled);
+    }
+
+    function test_megaCreditExpiresBackToTheMegaPot() public {
+        RejectsEth r = new RejectsEth();
+        vm.deal(address(this), 1 ether);
+        draw.fundMega{value: 1 ether}();
+        bytes32[] memory leaves = new bytes32[](1);
+        leaves[0] = Tree.leaf(address(r), 0, 1e18);
+        (bytes32 root, bytes32[] memory proof) = Tree.build(leaves, 0);
+        vm.prank(keeper);
+        uint256 id = draw.commit(TombolaDraw.Track.Mega, uint64(block.timestamp), ROUND, 1 ether, root, 1e18);
+        vm.warp(beacon.roundTime(ROUND) + 1);
+        vm.prank(keeper);
+        draw.settle(id, SIG, address(r), 0, 1e18, proof);
+        assertEq(draw.unclaimedMega(address(r)), 1 ether);
+        vm.warp(block.timestamp + 365 days);
+        draw.expireCredit(address(r));
+        assertEq(draw.potMega(), 1 ether);
+        assertEq(draw.potRegular(), 0);
+        assertTrue(draw.solvent());
     }
 
     function test_rolloverOnlyWhenNobodyWasEligible() public {
@@ -383,20 +453,17 @@ contract TombolaDrawTest is Test {
         assertEq(draw.potRegular(), 1 ether);
     }
 
-    function test_guardianRotatesTheKeeperBetweenDraws() public {
+    function test_guardianRotatesTheKeeperAtAnyTime() public {
         address next = makeAddr("next keeper");
         vm.expectRevert(TombolaDraw.NotGuardian.selector);
         draw.setKeeper(next);
         _fund(1 ether);
-        uint256 id = _commit(1 ether);
-        vm.prank(guardian);
-        vm.expectRevert(TombolaDraw.TrackBusy.selector);
-        draw.setKeeper(next);
-        vm.prank(guardian);
-        draw.cancel(id);
+        _commit(1 ether); // an open draw doesn't block the rotation: a leaked key can't hold it off
         vm.prank(guardian);
         draw.setKeeper(next);
         assertEq(draw.keeper(), next);
+        vm.prank(guardian);
+        draw.cancel(0);
         vm.prank(keeper);
         vm.expectRevert(TombolaDraw.NotKeeper.selector);
         draw.commit(TombolaDraw.Track.Regular, uint64(block.timestamp), ROUND, 1 ether, _root(), 400e18);

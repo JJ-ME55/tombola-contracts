@@ -55,7 +55,10 @@ contract TombolaSplitter {
         if (_lock == 1) revert Reentered();
         _lock = 1;
         if (address(escrow) != address(0) && escrow.balanceOf(address(this)) > 0) {
-            emit Harvested(escrow.claim());
+            // a claim the escrow refuses must not stop what is already here from reaching the pots
+            try escrow.claim() returns (uint256 claimed) {
+                emit Harvested(claimed);
+            } catch {}
         }
         uint256 bal = address(this).balance - teamOwed;
         if (bal > 0) _distribute(bal);

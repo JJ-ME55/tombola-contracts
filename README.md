@@ -9,7 +9,7 @@ Three contracts, all immutable, no owner, no upgrade path, no withdraw:
 | Contract | Role |
 | --- | --- |
 | [`src/TombolaSplitter.sol`](src/TombolaSplitter.sol) | Pons' `creatorFeeRecipient`. `harvest()` (anyone) claims the escrow's ETH and splits it 73.33% / 20% / 6.67% to the draw's regular pot, mega pot and the team fee wallet. |
-| [`src/TombolaDraw.sol`](src/TombolaDraw.sol) | Holds the two pots and the draw ledger. The keeper `commit`s a draw to a future drand round, then `settle`s it with drand's signature, the Merkle root of the published eligibility list and the winner's leaf proof. Pays the winner. |
+| [`src/TombolaDraw.sol`](src/TombolaDraw.sol) | Holds the two pots and the draw ledger. The keeper takes the snapshot, then `commit`s the draw: the list's Merkle root and total weight pinned together with a future drand round. Once the round is out anyone `settle`s it with drand's signature and the winner's leaf proof. Pays the winner. |
 | [`src/DrandBeacon.sol`](src/DrandBeacon.sol) | Verifies drand `evmnet` rounds (BLS on BN254, via the vendored randa-mu library) and stores each proven round's randomness. Already deployed on Robinhood Chain at `0xaf4fe3E1C2B4a6176392291704Fe4b87Df3b9A0E`; reused as is. |
 
 [`DESIGN.md`](DESIGN.md) is the design note: why Tombola moved from an in-token tax to Pons' creator tax, and what
@@ -21,7 +21,7 @@ changed.
 git clone --recurse-submodules https://github.com/JJ-ME55/tombola-contracts
 cd tombola-contracts
 forge build
-forge test        # 24 tests, including a real evmnet round from test/fixtures/evmnet.json
+forge test        # 28 tests, including a real evmnet round from test/fixtures/evmnet.json
 ```
 
 Solidity 0.8.26, EVM `cancun`, `via_ir`, `bytecode_hash = "none"`. The only submodule is forge-std (pinned to
@@ -34,6 +34,7 @@ bls-solidity at `11af179a`, MIT, unchanged).
    Anyone calls `TombolaSplitter.harvest()`: it claims and forwards the ETH via `fundRegular()` / `fundMega()`
    and a plain send to the team wallet (rounding dust goes to the team). If the team wallet rejects the send, its
    share waits in the splitter as `teamOwed` (anyone may retry with `payTeam()`); the pots are funded regardless.
+   If the escrow's `claim()` ever reverts, `harvest()` still splits whatever ETH is already in the splitter.
 2. **Snapshot, then commit.** At a due slot the keeper rebuilds the eligibility list from the token's `Transfer`
    logs at `snapshotTime` (algorithm below), publishes it (every wallet, balance, hold start, weight, plus the root),
    and calls `commit(track, snapshotTime, drandRound, amount, root, totalWeight)`. The contract requires
@@ -45,7 +46,8 @@ bls-solidity at `11af179a`, MIT, unchanged).
    the pot into `reserved`. The snapshot is the chain state at the last block with `timestamp <= snapshotTime`.
 3. **The window.** Between the commit and the round (at least 10 minutes) the list is public and the randomness
    does not exist yet. Anyone can recompute the list; the guardian may `cancel(id)` a draw whose list is wrong.
-4. **Settle.** Once the round is published the keeper calls `settle(id, drandSignature, winner, cumulativeBefore, weight, proof)`:
+4. **Settle.** Once the round is published anyone (normally the keeper) calls
+   `settle(id, drandSignature, winner, cumulativeBefore, weight, proof)`:
    - `beacon.prove(round, signature)` verifies the BLS signature (reverts `InvalidSignature` on a bad one) and
      stores `randomness = keccak256(signature)`.
    - `randomWord = uint256(keccak256(abi.encode(randomness, id)))`, `target = randomWord % totalWeight` with the
@@ -58,14 +60,16 @@ bls-solidity at `11af179a`, MIT, unchanged).
    - The draw records the random word and winner; the prize leaves `reserved` and is sent to the winner with a
      50,000 gas stipend. A failed send is credited to `unclaimed[winner]`: claimable by anyone for them
      (`claim`), redirectable by the winner itself (`redirectCredit`, for contracts that can't receive plain ETH),
-     and returned to the regular pot by anyone after a year uncollected (`expireCredit`).
-5. **Nobody eligible:** a draw committed with `totalWeight == 0` can only be `rollover(id, signature)`-ed: it
-   proves the round for the record and returns the prize to its pot. A draw with an eligible list cannot be rolled
-   over, so a known winner can't be re-drawn.
-6. **Something is wrong:** the guardian (a cold wallet) may `cancel(id)` a committed draw **only while its round is
-   still in the future**; once the round's time has passed nobody can cancel (the outcome is public), until seven
-   days later, when anyone may, so a dead keeper can't lock a prize. The prize returns to its pot.
-7. **Keeper rotation:** the guardian may `setKeeper()` when no draw is open (a leaked hot key, a new server).
+     and returned to the pot it came from (regular or mega) by anyone after a year uncollected (`expireCredit`).
+5. **Nobody eligible:** a draw committed with `totalWeight == 0` can only be `rollover(id, signature)`-ed (by
+   anyone): it proves the round for the record and returns the prize to its pot. A draw with an eligible list cannot
+   be rolled over, so a known winner can't be re-drawn.
+6. **Something is wrong:** the guardian (a cold wallet) may `cancel(id)` a committed draw **only until
+   `CANCEL_MARGIN` (1 minute) before its round**; from there the outcome is public and nobody can cancel, until
+   seven days after the round, when anyone may, so a prize nobody settles can't stay locked. The prize returns to
+   its pot. Because settling is permissionless, a keeper that dislikes a result cannot sit on it: anyone settles.
+7. **Keeper rotation:** the guardian may `setKeeper()` at any time (a leaked hot key, a new server); open draws are
+   pinned and anyone can settle them, so an open draw never holds the rotation off.
 
 `solvent()` states the accounting invariant: `balance >= potRegular + potMega + reserved + unclaimedTotal`.
 
@@ -79,20 +83,23 @@ The contracts enforce:
 - the randomness is drand's (BLS verified on chain) and the winner's index is `randomWord mod` the pinned total;
 - the winner is in the pinned list with the weight the keeper claimed, and the selection index falls in the
   winner's cumulative range;
-- a rollover is only possible for a draw pinned as empty, and no cancel is possible between the round's time and
-  seven days after it;
+- a rollover is only possible for a draw pinned as empty; settling and rolling over are permissionless once the
+  round is out; and no cancel is possible from a minute before the round's time until seven days after it;
 - pots only leave as settled prizes (or back into the pot on rollover/cancel/expiry). No privileged withdraw exists.
 
 The contracts cannot enforce that the pinned list is complete and the weights honest: the keeper is trusted to
 build an honest list. Anyone can prove a dishonest list from public data (the token's `Transfer` logs) in the
 window between the commit and the round, and the guardian can cancel it in that window. The keeper can choose
 *when* to commit (within the slot's lateness), but neither which outcome a round will give nor, once it is known,
-whether to accept it. A leaked keeper key can commit a dishonest list; the guardian's window and a rotation are the
-answer, not the contract. A lost keeper key with no rotation freezes the pots: the guardian must rotate it.
+whether it is honoured: anyone can settle. A leaked keeper key can commit a dishonest list; the guardian's window
+and a rotation (possible at any time) are the answer, not the contract. The commit-before-randomness guarantee
+assumes the sequencer's block timestamps stay within COMMIT_DELAY (10 minutes) of wall-clock time. The keeper is
+also trusted not to pin an inconsistent list (overlapping or gapped ranges): verifiers detect that from the
+published list, the contract does not.
 
-Privileged roles: `keeper` (commit, settle, rollover; replaceable by the guardian between draws), `guardian`
-(immutable: cancel before the round, rotate the keeper), `splitter` (immutable, named but not gated: anyone may
-fund the pots). The team fee wallet only receives.
+Privileged roles: `keeper` (commit; replaceable by the guardian at any time), `guardian` (immutable: cancel until a
+minute before the round, rotate the keeper), `splitter` (immutable, named but not gated: anyone may fund the pots).
+Settle, rollover, claim, expire and harvest are open to anyone. The team fee wallet only receives.
 
 ## Verifying a draw yourself
 
