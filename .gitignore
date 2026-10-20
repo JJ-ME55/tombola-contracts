@@ -1,0 +1,10 @@
+# Foundry build output
+out/
+cache/
+broadcast/
+
+# local secrets and state
+.env
+.env.*
+!.env.example
+*.log
