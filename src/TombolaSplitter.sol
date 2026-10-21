@@ -16,12 +16,12 @@ interface ITombolaDrawPots {
 /// @notice Immutable, no admin. Set as Tombola's Pons V2 creatorFeeRecipient, so every trade's creator tax (plus
 ///         Pons' 0.7% kickback) accrues to it in the Pons fee escrow, in ETH. Anyone may call harvest(): it claims
 ///         the escrow balance and splits it by fixed shares between the draw contract's regular pot, its mega pot
-///         and the team fee wallet. The shares are the original 3.5 / 1.2 / 0.9 / 0.4 plan with the liquidity
-///         0.9 folded into the pot, against the 6% total: 4.4 / 1.2 / 0.4.
+///         and the team fee wallet. Of the 6% each trade pays, 0.3% stays with Pons and 5.7% arrives here:
+///         4.0% of the trade to the drop pot, 1.0% to the mega pot, 0.7% to the team.
 contract TombolaSplitter {
-    uint256 public constant POT_BPS = 7333; // 4.4 / 6
-    uint256 public constant MEGA_BPS = 2000; // 1.2 / 6
-    uint256 public constant TEAM_BPS = 667; // 0.4 / 6
+    uint256 public constant POT_BPS = 7018; // 4.0% of the trade
+    uint256 public constant MEGA_BPS = 1754; // 1.0%
+    uint256 public constant TEAM_BPS = 1228; // 0.7%
     uint256 public constant BPS = 10_000;
 
     ITombolaDrawPots public immutable draw;

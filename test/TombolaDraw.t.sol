@@ -116,9 +116,9 @@ contract TombolaDrawTest is Test {
     function test_harvestSplitsEscrowFees() public {
         escrow.credit{value: 3 ether}(address(splitter));
         splitter.harvest();
-        assertEq(draw.potRegular(), 3 ether * 7333 / 10_000);
-        assertEq(draw.potMega(), 3 ether * 2000 / 10_000);
-        assertEq(team.balance, 3 ether - 3 ether * 7333 / 10_000 - 3 ether * 2000 / 10_000);
+        assertEq(draw.potRegular(), 3 ether * splitter.POT_BPS() / 10_000);
+        assertEq(draw.potMega(), 3 ether * splitter.MEGA_BPS() / 10_000);
+        assertEq(team.balance, 3 ether - 3 ether * splitter.POT_BPS() / 10_000 - 3 ether * splitter.MEGA_BPS() / 10_000);
         assertEq(address(splitter).balance, 0, "nothing stays in the splitter");
         assertTrue(draw.solvent());
     }
@@ -128,7 +128,7 @@ contract TombolaDrawTest is Test {
         TombolaSplitter s2 = new TombolaSplitter(ITombolaDrawPots(address(draw)), team, IPonsFeeEscrow(address(bad)));
         vm.deal(address(s2), 1 ether);
         s2.harvest();
-        assertEq(draw.potRegular(), 1 ether * 7333 / 10_000);
+        assertEq(draw.potRegular(), 1 ether * splitter.POT_BPS() / 10_000);
         assertEq(address(s2).balance, 0);
     }
 

@@ -8,7 +8,7 @@ Three contracts, all immutable, no owner, no upgrade path, no withdraw:
 
 | Contract | Role |
 | --- | --- |
-| [`src/TombolaSplitter.sol`](src/TombolaSplitter.sol) | Pons' `creatorFeeRecipient`. `harvest()` (anyone) claims the escrow's ETH and splits it 73.33% / 20% / 6.67% to the draw's regular pot, mega pot and the team fee wallet. |
+| [`src/TombolaSplitter.sol`](src/TombolaSplitter.sol) | Pons' `creatorFeeRecipient`. `harvest()` (anyone) claims the escrow's ETH and splits it 70.18% / 17.54% / 12.28% to the draw's regular pot, mega pot and the team fee wallet. |
 | [`src/TombolaDraw.sol`](src/TombolaDraw.sol) | Holds the two pots and the draw ledger. The keeper takes the snapshot, then `commit`s the draw: the list's Merkle root and total weight pinned together with a future drand round. Once the round is out anyone `settle`s it with drand's signature and the winner's leaf proof. Pays the winner. |
 | [`src/DrandBeacon.sol`](src/DrandBeacon.sol) | Verifies drand `evmnet` rounds (BLS on BN254, via the vendored randa-mu library) and stores each proven round's randomness. Already deployed on Robinhood Chain at `0xaf4fe3E1C2B4a6176392291704Fe4b87Df3b9A0E`; reused as is. |
 

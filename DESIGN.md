@@ -12,7 +12,7 @@ where the tax is Pons' own creator tax, charged on buys and sells alike, outside
 | Token | custom (hold clock, checkpoints, listed array) | Pons' standard fixed-supply ERC-20, no hooks |
 | Tax | 6% in the token, buys and sells | Pons creator tax 5% + Pons base 1% = 6% per side to the trader |
 | Where the tax lands | DropVault, in ETH, via tax orders | Pons fee escrow, in ETH; the splitter claims it |
-| Split | 3.5 / 1.2 / 0.9 / 0.4 of 6 | 73.33% pot / 20% mega / 6.67% team of the 5.7% that arrives (liquidity folded into the pot) |
+| Split | 3.5 / 1.2 / 0.9 / 0.4 of 6 | 4.0 / 1.0 / 0.7 of the trade (70.18% pot / 17.54% mega / 12.28% team of the 5.7% that arrives; 0.3% stays with Pons) |
 | Draw | on chain, enforced by the vault | off chain in the keeper, committed and provable; payouts pushed through a Merkle round |
 | Randomness | drand, verified on chain in the vault | drand, the round committed on chain together with the pinned snapshot list, before the round exists; verified by anyone |
 | Winner paid | by the vault, in ETH | by the TombolaDraw contract, in ETH, pushed by the keeper (claimable by the winner too) |
